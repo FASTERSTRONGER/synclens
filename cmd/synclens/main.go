@@ -23,12 +23,20 @@ import (
 	"synclens/internal/web"
 )
 
+var Version = "v1.0"
+
 func main() {
 	peerMode := flag.Bool("peer", false, "Run in Peer Mode (for the remote device)")
 	guiMode := flag.Bool("gui", false, "Run in Dashboard GUI Mode")
 	pinFlag := flag.String("pin", "", "Optional 6-digit pairing PIN for Peer Mode")
 	portFlag := flag.Int("port", 0, "Optional override port")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("synclens", Version)
+		return
+	}
 
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -37,7 +45,7 @@ func main() {
 
 	if !*peerMode && !*guiMode {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Println("=== SyncLens — LAN Visual Diff & Sync ===")
+		fmt.Printf("=== SyncLens %s — LAN Visual Diff & Sync ===\n", Version)
 		fmt.Println("  [1] Dashboard GUI (Perangkat Utama — periksa & bandingkan file)")
 		fmt.Println("  [2] Peer Mode     (Perangkat Lawan — tampilkan IP & PIN)")
 		fmt.Print("Pilih mode [1]: ")
