@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SyncLens — LAN Visual Diff & Sync</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-title">SyncLens</span>
+      <span class="brand-sub" id="localDeviceLabel">Local: —</span>
+    </div>
+    <div class="peer-status" id="peerBadge">
+      <span class="dot offline" id="peerDot"></span>
+      <span id="peerStatusText">Belum terhubung ke Peer (Laptop)</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="panel setup-grid">
+      <div class="card">
+        <h2>1. Koneksi Peer (LAN)</h2>
+        <div class="form-row">
+          <label for="pinInput">Pairing PIN (6 digit)</label>
+          <input id="pinInput" type="text" maxlength="6" placeholder="Masukkan PIN dari Peer" autocomplete="off">
+        </div>
+        <div class="form-row">
+          <label for="ipInput">IP Peer (opsional, kosongkan untuk Auto-Discover)</label>
+          <input id="ipInput" type="text" placeholder="Contoh: 192.168.1.15">
+        </div>
+        <div class="btn-row">
+          <button id="connectBtn" class="btn primary">Hubungkan ke Peer</button>
+        </div>
+        <div id="processAlert" class="alert hidden"></div>
+      </div>
+
+      <div class="card">
+        <h2>2. Pasangan Folder (PC ↔ Laptop)</h2>
+        <div class="form-row">
+          <label for="pairSelect">Preset / Pasangan Tersimpan</label>
+          <div class="inline-group">
+            <select id="pairSelect"></select>
+            <button id="newPairBtn" class="btn secondary" type="button">+ Baru</button>
+          </div>
+        </div>
+        <div class="two-col">
+          <div class="form-row">
+            <label for="localPathInput">Path Lokal (Perangkat Ini)</label>
+            <div class="inline-group">
+              <input id="localPathInput" type="text" placeholder="D:\Projects\MyProject">
+              <button id="browseLocalBtn" class="btn secondary" type="button">Pilih...</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label for="remotePathInput">Path Peer (Perangkat Lawan)</label>
+            <div class="inline-group">
+              <input id="remotePathInput" type="text" placeholder="D:\Projects\MyProject">
+              <button id="browsePeerBtn" class="btn secondary" type="button">Pilih...</button>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="excludesInput">Pengecualian / Excludes (pisahkan dengan koma)</label>
+          <input id="excludesInput" type="text" placeholder="*.tmp, *.lock, $RECYCLE.BIN">
+        </div>
+        <div class="btn-row">
+          <button id="savePairBtn" class="btn secondary" type="button">Simpan Pasangan</button>
+          <button id="scanBtn" class="btn primary" type="button">Scan &amp; Bandingkan</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel hidden" id="scanProgressSection">
+      <div class="progress-head">
+        <h2 id="scanSectionTitle">Memindai File Secara Live...</h2>
+        <button id="cancelScanBtn" class="btn secondary" type="button">Batalkan</button>
+      </div>
+      <div class="scan-live-grid">
+        <div class="scan-box">
+          <div class="scan-box-head">
+            <span>Lokal (PC)</span>
+            <span id="scanLocalStats" class="mono">0 file (0 B)</span>
+          </div>
+          <div id="scanLocalCurrent" class="scan-current mono">Menunggu...</div>
+        </div>
+        <div class="scan-box">
+          <div class="scan-box-head">
+            <span>Peer (Laptop)</span>
+            <span id="scanPeerStats" class="mono">0 file (0 B)</span>
+          </div>
+          <div id="scanPeerCurrent" class="scan-current mono">Menunggu...</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel hidden" id="resultsSection">
+      <div class="summary-bar" id="summaryBar">
+        <button class="stat-chip active" data-filter="DIFF">Semua Perbedaan (<span id="countDiff">0</span>)</button>
+        <button class="stat-chip" data-filter="NEWER_LOCAL">Lebih Baru di Lokal (<span id="countNewerLocal">0</span>)</button>
+        <button class="stat-chip" data-filter="NEWER_PEER">Lebih Baru di Peer (<span id="countNewerPeer">0</span>)</button>
+        <button class="stat-chip" data-filter="NEW_LOCAL">Hanya di Lokal (<span id="countNewLocal">0</span>)</button>
+        <button class="stat-chip" data-filter="NEW_PEER">Hanya di Peer (<span id="countNewPeer">0</span>)</button>
+        <button class="stat-chip" data-filter="IDENTICAL">Identik (<span id="countIdentical">0</span>)</button>
+      </div>
+
+      <div id="verifyHintBar" class="hint-bar hidden">
+        <span id="verifyHintText"></span>
+        <button id="verifyTextBtn" class="btn secondary" type="button">Verify SHA-256 (Teks/Kode)</button>
+      </div>
+
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <input id="searchInput" type="search" placeholder="Cari nama file atau folder...">
+          <button id="viewModeBtn" class="btn secondary" type="button">Mode: File Manager</button>
+        </div>
+        <div class="batch-controls">
+          <select id="batchActionSelect">
+            <option value="">— Ubah aksi item tercentang —</option>
+            <option value="default">Ikuti Rekomendasi Terbaru</option>
+            <option value="push">Copy Lokal → Peer</option>
+            <option value="pull">Copy Peer → Lokal</option>
+            <option value="delete_local">Hapus di Lokal</option>
+            <option value="delete_peer">Hapus di Peer</option>
+            <option value="skip">Lewati (Skip)</option>
+          </select>
+          <button id="applyBatchBtn" class="btn secondary" type="button">Terapkan</button>
+          <button id="verifyHashBtn" class="btn secondary" type="button">Verify SHA-256</button>
+        </div>
+      </div>
+
+      <div id="breadcrumbBar" class="breadcrumb-bar"></div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="selectAllChk" title="Pilih semua yang terlihat"></th>
+              <th>Path File</th>
+              <th>Status</th>
+              <th class="num">Lokal (PC)</th>
+              <th class="num">Peer (Laptop)</th>
+              <th>Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="diffTableBody"></tbody>
+        </table>
+      </div>
+
+      <div id="spacePanel" class="space-grid hidden">
+        <div class="space-box">
+          <div class="space-box-head">
+            <span>Space Lokal (PC)</span>
+            <span id="localSpaceFree" class="mono">—</span>
+          </div>
+          <div id="localSpaceNeed" class="space-need mono">Kebutuhan: 0 B</div>
+        </div>
+        <div class="space-box">
+          <div class="space-box-head">
+            <span>Space Peer (Laptop)</span>
+            <span id="peerSpaceFree" class="mono">—</span>
+          </div>
+          <div id="peerSpaceNeed" class="space-need mono">Kebutuhan: 0 B</div>
+        </div>
+      </div>
+
+      <div class="exec-bar">
+        <label class="toggle-safe">
+          <input type="checkbox" id="permanentDeleteChk">
+          <span>Hapus permanen (jika tidak dicentang, masuk ke Windows Recycle Bin)</span>
+        </label>
+        <div class="exec-actions">
+          <span id="execSummaryText">0 aksi siap dijalankan</span>
+          <button id="executeBtn" class="btn danger-accent" type="button">Eksekusi Aksi Terpilih</button>
+        </div>
+      </div>
+
+      <div id="progressPanel" class="progress-box hidden">
+        <div class="progress-head">
+          <span id="progressLabel" class="progress-label">Memproses...</span>
+          <div class="progress-meta">
+            <span id="progressSpeed" class="mono">0.00 MB/s</span>
+            <button id="cancelExecBtn" class="btn secondary" type="button">Batalkan</button>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div id="execLog" class="exec-log"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="browseModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="browseModalTitle">Pilih Folder</h3>
+        <button id="closeBrowseBtn" class="btn secondary" type="button">Tutup</button>
+      </div>
+      <div class="browse-nav">
+        <button id="browseUpBtn" class="btn secondary" type="button">⬆ Drive / Atas</button>
+        <input id="browseCurrentPath" type="text" readonly placeholder="Daftar Drive">
+      </div>
+      <div id="browseList" class="dir-list"></div>
+      <div class="modal-foot">
+        <button id="selectCurrentDirBtn" class="btn primary" type="button">Pilih Folder Ini</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

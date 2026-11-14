@@ -1,0 +1,10 @@
+# Binaries & local runtime configuration
+*.exe
+*.exe~
+synclens-pairs.json
+
+# Local documentation & workspace artifacts
+walkthrough/
+history_conversation/
+tasks/
+outputs/
