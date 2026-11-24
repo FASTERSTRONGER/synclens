@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -33,11 +34,21 @@ type Baseline struct {
 	Entries   map[string]Entry `json:"entries"`
 }
 
+func normalizeEndpointPath(p string) string {
+	s := strings.TrimSpace(p)
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = path.Clean(s)
+	if len(s) == 2 && s[1] == ':' {
+		s += "/"
+	}
+	return strings.ToLower(s)
+}
+
 // PairKey returns a symmetrical 16-hex-char identifier derived from both device
 // names and cleaned paths, sorted canonically so PC<->Laptop produce the same key.
 func PairKey(devA, pathA, devB, pathB string) string {
-	epA := strings.ToLower(strings.TrimSpace(devA)) + "|" + strings.ToLower(filepath.Clean(pathA))
-	epB := strings.ToLower(strings.TrimSpace(devB)) + "|" + strings.ToLower(filepath.Clean(pathB))
+	epA := strings.ToLower(strings.TrimSpace(devA)) + "|" + normalizeEndpointPath(pathA)
+	epB := strings.ToLower(strings.TrimSpace(devB)) + "|" + normalizeEndpointPath(pathB)
 	if epA > epB {
 		epA, epB = epB, epA
 	}

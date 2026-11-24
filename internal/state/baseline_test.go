@@ -21,6 +21,10 @@ func TestBaselineStoreRoundTripAndReset(t *testing.T) {
 		t.Fatalf("expected symmetrical key for different paths, got %s vs %s", kDiff1, kDiff2)
 	}
 
+	if a, b := PairKey("PC", `D:\`, "Laptop", `D:/`), PairKey("Laptop", `d:`, "PC", `d:\`); a != b {
+		t.Fatalf("expected symmetrical drive-root key, got %s vs %s", a, b)
+	}
+
 	badKeys := []string{"", "../evil", "0123456789abcde", "0123456789ABCDEF", "zzzzzzzzzzzzzzzz"}
 	for _, bk := range badKeys {
 		if ValidKey(bk) {
