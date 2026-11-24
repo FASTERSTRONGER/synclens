@@ -24,7 +24,7 @@ go run ./tools/genicon
 go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out cmd/synclens/rsrc --arch amd64 --product-version=2.0.0.0 --file-version=2.0.0.0
 
 # Build Windows executable
-go build -ldflags "-s -w -X main.Version=v2.0" -o synclens.exe ./cmd/synclens
+go build -ldflags "-s -w -X main.Version=v2.0" -o synclens-v2.0.exe ./cmd/synclens
 ```
 
 ## Usage
