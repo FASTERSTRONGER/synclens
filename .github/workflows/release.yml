@@ -27,9 +27,18 @@ jobs:
         env:
           GOOS: windows
           GOARCH: amd64
-        run: go build -ldflags "-s -w -X main.Version=${{ github.ref_name }}" -o synclens.exe ./cmd/synclens
+        run: |
+          BIN_NAME="synclens-${GITHUB_REF_NAME}.exe"
+          go build -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME}" -o "$BIN_NAME" ./cmd/synclens
 
-      - name: Create GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" synclens.exe --title "SyncLens ${{ github.ref_name }}" --generate-notes
+        run: |
+          BIN_NAME="synclens-${GITHUB_REF_NAME}.exe"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "$BIN_NAME" --clobber
+            gh release delete-asset "${GITHUB_REF_NAME}" synclens.exe --yes || true
+          else
+            gh release create "${GITHUB_REF_NAME}" "$BIN_NAME" --title "SyncLens ${GITHUB_REF_NAME}" --generate-notes
+          fi
