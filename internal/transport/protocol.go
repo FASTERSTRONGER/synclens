@@ -34,3 +34,9 @@ type DeleteRequest struct {
 	RelPath   string `json:"rel_path"`
 	Permanent bool   `json:"permanent"`
 }
+
+type MoveRequest struct {
+	RootPath   string `json:"root_path"`
+	OldRelPath string `json:"old_rel_path"`
+	NewRelPath string `json:"new_rel_path"`
+}

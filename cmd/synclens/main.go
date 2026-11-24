@@ -23,7 +23,9 @@ import (
 	"synclens/internal/web"
 )
 
-var Version = "v1.0"
+var Version = "v2.0"
+
+const Developer = "OK Muhammad Majid Maulana"
 
 func main() {
 	peerMode := flag.Bool("peer", false, "Run in Peer Mode (for the remote device)")
@@ -34,7 +36,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("synclens", Version)
+		fmt.Printf("SyncLens %s — by %s\n", Version, Developer)
 		return
 	}
 
@@ -46,6 +48,7 @@ func main() {
 	if !*peerMode && !*guiMode {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Printf("=== SyncLens %s — LAN Visual Diff & Sync ===\n", Version)
+		fmt.Printf("Pengembang: %s\n", Developer)
 		fmt.Println("  [1] Dashboard GUI (Perangkat Utama — periksa & bandingkan file)")
 		fmt.Println("  [2] Peer Mode     (Perangkat Lawan — tampilkan IP & PIN)")
 		fmt.Print("Pilih mode [1]: ")
@@ -103,7 +106,7 @@ func runPeer(deviceName, customPIN string, overridePort int) {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	fmt.Println("\n=== SyncLens PEER MODE Aktif ===")
+	fmt.Printf("\n=== SyncLens %s PEER MODE Aktif (by %s) ===\n", Version, Developer)
 	fmt.Printf("Nama Perangkat : %s\n", deviceName)
 	fmt.Printf("Pairing PIN    : %s\n", pin)
 	fmt.Printf("Port LAN       : TCP :%d | UDP :%d\n", httpPort, config.DefaultDiscoveryPort)
@@ -128,6 +131,7 @@ func runDashboard(deviceName string, overridePort int) {
 		fmt.Fprintf(os.Stderr, "Failed to init dashboard: %v\n", err)
 		os.Exit(1)
 	}
+	dash.SetAppInfo(Version, Developer)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", webPort)
 	url := "http://" + addr
@@ -147,7 +151,7 @@ func runDashboard(deviceName string, overridePort int) {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	fmt.Printf("\n=== SyncLens Dashboard GUI ===\n")
+	fmt.Printf("\n=== SyncLens %s Dashboard GUI (by %s) ===\n", Version, Developer)
 	fmt.Printf("Membuka browser di: %s\n", url)
 	fmt.Println("Tutup jendela ini atau tekan Ctrl+C untuk keluar.")
 	openBrowser(url)

@@ -58,3 +58,85 @@ func TestCompareStatuses(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareWithBaselineDeletionsConflictsAndMoves(t *testing.T) {
+	t0 := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).UnixNano()
+	tNew := t0 + int64(20*time.Second)
+
+	baseline := map[string]BaselineMeta{
+		"deleted_on_pc.txt":       {Size: 100, MTimeNS: t0},
+		"deleted_on_laptop.txt":   {Size: 200, MTimeNS: t0},
+		"conflict_del_local.txt":  {Size: 300, MTimeNS: t0},
+		"conflict_del_peer.txt":   {Size: 400, MTimeNS: t0},
+		"old_folder/renamed.pdf":  {Size: 5000, MTimeNS: t0},
+		"ambig/dup_a.bin":         {Size: 777, MTimeNS: t0},
+		"ambig/dup_b.bin":         {Size: 777, MTimeNS: t0},
+		"identical.txt":           {Size: 50, MTimeNS: t0},
+	}
+
+	local := map[string]scanner.FileMeta{
+		"deleted_on_laptop.txt":  {RelPath: "deleted_on_laptop.txt", Size: 200, MTimeNS: t0},
+		"conflict_del_peer.txt":  {RelPath: "conflict_del_peer.txt", Size: 450, MTimeNS: tNew},
+		"new_folder/renamed.pdf": {RelPath: "new_folder/renamed.pdf", Size: 5000, MTimeNS: t0},
+		"new_on_pc.txt":          {RelPath: "new_on_pc.txt", Size: 90, MTimeNS: tNew},
+		"ambig/dup_1.bin":        {RelPath: "ambig/dup_1.bin", Size: 777, MTimeNS: t0},
+		"ambig/dup_2.bin":        {RelPath: "ambig/dup_2.bin", Size: 777, MTimeNS: t0},
+		"identical.txt":          {RelPath: "identical.txt", Size: 50, MTimeNS: t0},
+	}
+
+	peer := map[string]scanner.FileMeta{
+		"deleted_on_pc.txt":      {RelPath: "deleted_on_pc.txt", Size: 100, MTimeNS: t0},
+		"conflict_del_local.txt": {RelPath: "conflict_del_local.txt", Size: 305, MTimeNS: tNew},
+		"old_folder/renamed.pdf": {RelPath: "old_folder/renamed.pdf", Size: 5000, MTimeNS: t0},
+		"ambig/dup_a.bin":        {RelPath: "ambig/dup_a.bin", Size: 777, MTimeNS: t0},
+		"ambig/dup_b.bin":        {RelPath: "ambig/dup_b.bin", Size: 777, MTimeNS: t0},
+		"identical.txt":          {RelPath: "identical.txt", Size: 50, MTimeNS: t0},
+	}
+
+	items, sum := CompareWithBaseline(local, peer, baseline)
+	if sum.EmptyLocalGuard || sum.EmptyPeerGuard {
+		t.Fatalf("unexpected empty guard: local=%v peer=%v", sum.EmptyLocalGuard, sum.EmptyPeerGuard)
+	}
+
+	byPath := make(map[string]Item, len(items))
+	for _, it := range items {
+		byPath[it.RelPath] = it
+	}
+
+	checks := []struct {
+		path   string
+		status Status
+		action string
+		oldRel string
+	}{
+		{"deleted_on_pc.txt", StatusDeletedLocal, "delete_peer", ""},
+		{"deleted_on_laptop.txt", StatusDeletedPeer, "delete_local", ""},
+		{"conflict_del_local.txt", StatusConflictDeleteLocal, "skip", ""},
+		{"conflict_del_peer.txt", StatusConflictDeletePeer, "skip", ""},
+		{"new_folder/renamed.pdf", StatusMovePeer, "move_peer", "old_folder/renamed.pdf"},
+		{"new_on_pc.txt", StatusNewLocal, "push", ""},
+		{"ambig/dup_a.bin", StatusDeletedLocal, "delete_peer", ""},
+		{"ambig/dup_1.bin", StatusNewLocal, "push", ""},
+		{"identical.txt", StatusIdentical, "skip", ""},
+	}
+	for _, c := range checks {
+		it, ok := byPath[c.path]
+		if !ok {
+			t.Errorf("missing item %s", c.path)
+			continue
+		}
+		if it.Status != c.status || it.DefaultAction != c.action || it.OldRelPath != c.oldRel {
+			t.Errorf("%s: got (%s, %s, old=%q), want (%s, %s, old=%q)",
+				c.path, it.Status, it.DefaultAction, it.OldRelPath, c.status, c.action, c.oldRel)
+		}
+	}
+	if _, stillHasOld := byPath["old_folder/renamed.pdf"]; stillHasOld {
+		t.Errorf("expected old_folder/renamed.pdf merged into MOVE_PEER")
+	}
+
+	// Empty-root guard should fire when one side is completely empty with non-empty baseline.
+	_, emptySum := CompareWithBaseline(map[string]scanner.FileMeta{}, peer, baseline)
+	if !emptySum.EmptyLocalGuard || emptySum.MovePeer != 0 {
+		t.Fatalf("expected EmptyLocalGuard=true and MovePeer=0, got %+v", emptySum)
+	}
+}

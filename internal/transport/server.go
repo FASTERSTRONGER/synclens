@@ -17,12 +17,14 @@ import (
 	"synclens/internal/config"
 	"synclens/internal/fsops"
 	"synclens/internal/scanner"
+	"synclens/internal/state"
 )
 
 type PeerServer struct {
 	deviceName string
 	pin        string
 	workers    int
+	stateStore *state.Store
 }
 
 func NewPeerServer(deviceName, pin string, workers int) *PeerServer {
@@ -33,7 +35,13 @@ func NewPeerServer(deviceName, pin string, workers int) *PeerServer {
 		deviceName: deviceName,
 		pin:        pin,
 		workers:    workers,
+		stateStore: state.NewStore(state.DefaultStateDir()),
 	}
+}
+
+// SetStateDir overrides the baseline state storage directory (used in tests).
+func (s *PeerServer) SetStateDir(dir string) {
+	s.stateStore = state.NewStore(dir)
 }
 
 func (s *PeerServer) Handler() http.Handler {
@@ -47,6 +55,8 @@ func (s *PeerServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/hash-stream", s.withAuth(s.handleHashStream))
 	mux.HandleFunc("/api/v1/file", s.withAuth(s.handleFile))
 	mux.HandleFunc("/api/v1/delete", s.withAuth(s.handleDelete))
+	mux.HandleFunc("/api/v1/move", s.withAuth(s.handleMove))
+	mux.HandleFunc("/api/v1/baseline", s.withAuth(s.handleBaseline))
 	return mux
 }
 
@@ -358,6 +368,93 @@ func (s *PeerServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *PeerServer) handleMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req MoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	oldTarget, err := SafeJoin(req.RootPath, req.OldRelPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	newTarget, err := SafeJoin(req.RootPath, req.NewRelPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(oldTarget, newTarget) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if err := fsops.EnsureParentDir(newTarget); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(oldTarget, newTarget); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fsops.CleanEmptyParents(filepath.Dir(oldTarget), config.ExpandPath(req.RootPath))
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *PeerServer) handleBaseline(w http.ResponseWriter, r *http.Request) {
+	if s.stateStore == nil {
+		http.Error(w, "state store not initialized", http.StatusInternalServerError)
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if !state.ValidKey(key) {
+		http.Error(w, "invalid baseline key", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		b, err := s.stateStore.Load(key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if b == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		gz, err := state.EncodeGzip(b)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(gz)
+	case http.MethodPut:
+		b, err := state.DecodeGzip(io.LimitReader(r.Body, 64<<20))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b.Key = key
+		if err := s.stateStore.Save(b); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		if err := s.stateStore.Reset(key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

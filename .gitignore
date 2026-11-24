@@ -2,6 +2,7 @@
 *.exe
 *.exe~
 synclens-pairs.json
+synclens-state/
 
 # Local documentation & workspace artifacts
 walkthrough/

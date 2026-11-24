@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,7 @@ import (
 	"synclens/internal/discovery"
 	"synclens/internal/fsops"
 	"synclens/internal/scanner"
+	"synclens/internal/state"
 	"synclens/internal/transport"
 )
 
@@ -29,16 +32,23 @@ type DashboardServer struct {
 	deviceName string
 	pairsPath  string
 	pairsCfg   *config.PairsConfig
+	appVersion string
+	developer  string
+	stateStore *state.Store
 
-	mu         sync.RWMutex
-	peerClient *transport.PeerClient
-	peerInfo   *discovery.PeerInfo
-	lastLocal       map[string]scanner.FileMeta
-	lastPeer        map[string]scanner.FileMeta
-	lastItems       []diff.Item
-	lastSum         diff.Summary
-	textVerifyPaths []string
-	lastPair        config.FolderPair
+	mu                sync.RWMutex
+	peerClient        *transport.PeerClient
+	peerInfo          *discovery.PeerInfo
+	lastLocal         map[string]scanner.FileMeta
+	lastPeer          map[string]scanner.FileMeta
+	lastItems         []diff.Item
+	lastSum           diff.Summary
+	lastBaseline      *state.Baseline
+	lastBaselineKey   string
+	lastResolvedLocal string
+	lastResolvedPeer  string
+	textVerifyPaths   []string
+	lastPair          config.FolderPair
 
 	execMu       sync.Mutex
 	opMu         sync.Mutex
@@ -73,12 +83,28 @@ func NewDashboardServer(deviceName, pairsPath string) (*DashboardServer, error) 
 	if err != nil {
 		return nil, err
 	}
+	stateDir := filepath.Join(filepath.Dir(pairsPath), "synclens-state")
 	return &DashboardServer{
 		deviceName: deviceName,
 		pairsPath:  pairsPath,
 		pairsCfg:   cfg,
+		appVersion: "v2.0",
+		developer:  "OK Muhammad Majid Maulana",
+		stateStore: state.NewStore(stateDir),
 		sseSubs:    make(map[chan string]struct{}),
 	}, nil
+}
+
+// SetAppInfo overrides application version and developer metadata exposed to the web UI.
+func (s *DashboardServer) SetAppInfo(version, developer string) {
+	s.mu.Lock()
+	if version != "" {
+		s.appVersion = version
+	}
+	if developer != "" {
+		s.developer = developer
+	}
+	s.mu.Unlock()
 }
 
 func (s *DashboardServer) Handler() http.Handler {
@@ -94,6 +120,7 @@ func (s *DashboardServer) Handler() http.Handler {
 	mux.HandleFunc("/api/local/tree", s.handleTree)
 	mux.HandleFunc("/api/local/verify-hash", s.handleVerifyHash)
 	mux.HandleFunc("/api/local/execute", s.handleExecute)
+	mux.HandleFunc("/api/local/reset-baseline", s.handleResetBaseline)
 	mux.HandleFunc("/api/local/cancel", s.handleCancel)
 	mux.HandleFunc("/api/local/events", s.handleEvents)
 	return mux
@@ -106,10 +133,14 @@ func (s *DashboardServer) handlePairs(w http.ResponseWriter, r *http.Request) {
 		client := s.peerClient
 		peer := s.peerInfo
 		pairs := s.pairsCfg.Pairs
+		ver := s.appVersion
+		dev := s.developer
 		s.mu.RUnlock()
 
 		resp := map[string]any{
 			"device_name": s.deviceName,
+			"version":     ver,
+			"developer":   dev,
 			"pairs":       pairs,
 			"connected":   false,
 		}
@@ -344,7 +375,49 @@ func (s *DashboardServer) handleCompare(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	items, summary := diff.Compare(localMeta, peerResp.Entries)
+	s.mu.RLock()
+	peerInfo := s.peerInfo
+	s.mu.RUnlock()
+	peerName := "peer"
+	if peerInfo != nil && peerInfo.DeviceName != "" {
+		peerName = peerInfo.DeviceName
+	}
+
+	pairKey := state.PairKey(s.deviceName, localRoot, peerName, peerResp.ResolvedRoot)
+	localBase, _ := s.stateStore.Load(pairKey)
+	peerBase, _ := client.GetBaseline(ctx, pairKey)
+
+	var activeBase *state.Baseline
+	var peerNeedsSync bool
+	switch {
+	case peerBase != nil && (localBase == nil || peerBase.UpdatedAt > localBase.UpdatedAt):
+		activeBase = peerBase
+		_ = s.stateStore.Save(activeBase)
+	case localBase != nil:
+		activeBase = localBase
+		if peerBase == nil || localBase.UpdatedAt > peerBase.UpdatedAt {
+			peerNeedsSync = true
+		}
+	default:
+		activeBase = &state.Baseline{
+			Version: state.CurrentVersion,
+			Key:     pairKey,
+			Entries: make(map[string]state.Entry),
+		}
+	}
+
+	items, summary := diff.CompareWithBaseline(localMeta, peerResp.Entries, toBaselineMeta(activeBase))
+
+	if !summary.EmptyLocalGuard && !summary.EmptyPeerGuard {
+		if updateBaselineFromCompare(activeBase, localMeta, peerResp.Entries, items) {
+			activeBase.UpdatedAt = time.Now().UnixNano()
+			_ = s.stateStore.Save(activeBase)
+			peerNeedsSync = true
+		}
+		if peerNeedsSync && len(activeBase.Entries) > 0 {
+			_ = client.PutBaseline(ctx, pairKey, activeBase)
+		}
+	}
 
 	const maxTextVerifySize = int64(16 * 1024 * 1024)
 	const mtimeTol = int64(2_000_000_000)
@@ -363,6 +436,10 @@ func (s *DashboardServer) handleCompare(w http.ResponseWriter, r *http.Request) 
 	s.lastPeer = peerResp.Entries
 	s.lastItems = items
 	s.lastSum = summary
+	s.lastBaseline = activeBase
+	s.lastBaselineKey = pairKey
+	s.lastResolvedLocal = localRoot
+	s.lastResolvedPeer = peerResp.ResolvedRoot
 	s.textVerifyPaths = textCandidates
 	s.lastPair = pair
 	s.mu.Unlock()
@@ -370,17 +447,19 @@ func (s *DashboardServer) handleCompare(w http.ResponseWriter, r *http.Request) 
 	localSpace, _ := fsops.GetDiskSpace(localRoot)
 	peerSpace, _ := client.GetDiskSpace(ctx, peerResp.ResolvedRoot)
 
-	diffTotal := summary.NewLocal + summary.NewPeer + summary.NewerLocal + summary.NewerPeer + summary.SizeDiff + summary.HashDiff
-	dashLog("Compare selesai: %d berbeda, %d identik", diffTotal, summary.Identical)
+	diffTotal := summary.Total - summary.Identical
+	dashLog("Compare selesai: %d berbeda, %d identik (baseline: %d)", diffTotal, summary.Identical, len(activeBase.Entries))
 
 	writeJSON(w, map[string]any{
 		"resolved_local":    localRoot,
 		"resolved_peer":     peerResp.ResolvedRoot,
 		"summary":           summary,
+		"total_diff":        diffTotal,
+		"baseline_count":    len(activeBase.Entries),
 		"text_verify_count": len(textCandidates),
 		"local_space":       localSpace,
 		"peer_space":        peerSpace,
-		"items":             filterItems(items, "DIFF", "", 2000),
+		"items":             filterItems(items, "DIFF", "", 20000),
 	})
 }
 
@@ -414,6 +493,7 @@ func (s *DashboardServer) handleItems(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query().Get("q")
 	prefix := strings.Trim(strings.TrimSpace(r.URL.Query().Get("prefix")), "/")
+	allFlag := r.URL.Query().Get("all") == "1"
 
 	s.mu.RLock()
 	items := s.lastItems
@@ -432,7 +512,11 @@ func (s *DashboardServer) handleItems(w http.ResponseWriter, r *http.Request) {
 		}
 		result = filtered
 	} else {
-		result = filterItems(items, filter, q, 2000)
+		limit := 20000
+		if allFlag {
+			limit = 0
+		}
+		result = filterItems(items, filter, q, limit)
 	}
 
 	writeJSON(w, map[string]any{
@@ -442,16 +526,20 @@ func (s *DashboardServer) handleItems(w http.ResponseWriter, r *http.Request) {
 }
 
 type treeFolder struct {
-	Name       string `json:"name"`
-	RelPath    string `json:"rel_path"`
-	TotalFiles int    `json:"total_files"`
-	DiffCount  int    `json:"diff_count"`
-	NewLocal   int    `json:"new_local"`
-	NewPeer    int    `json:"new_peer"`
-	NewerLocal int    `json:"newer_local"`
-	NewerPeer  int    `json:"newer_peer"`
-	LocalSize  int64  `json:"local_size"`
-	PeerSize   int64  `json:"peer_size"`
+	Name         string `json:"name"`
+	RelPath      string `json:"rel_path"`
+	TotalFiles   int    `json:"total_files"`
+	DiffCount    int    `json:"diff_count"`
+	NewLocal     int    `json:"new_local"`
+	NewPeer      int    `json:"new_peer"`
+	NewerLocal   int    `json:"newer_local"`
+	NewerPeer    int    `json:"newer_peer"`
+	DeletedLocal int    `json:"deleted_local"`
+	DeletedPeer  int    `json:"deleted_peer"`
+	MoveCount    int    `json:"move_count"`
+	Conflict     int    `json:"conflict"`
+	LocalSize    int64  `json:"local_size"`
+	PeerSize     int64  `json:"peer_size"`
 }
 
 func (s *DashboardServer) handleTree(w http.ResponseWriter, r *http.Request) {
@@ -479,10 +567,7 @@ func (s *DashboardServer) handleTree(w http.ResponseWriter, r *http.Request) {
 	var files []diff.Item
 
 	for _, it := range items {
-		if filter == "DIFF" && it.Status == diff.StatusIdentical {
-			continue
-		}
-		if filter != "DIFF" && filter != "ALL" && string(it.Status) != filter {
+		if !matchesFilter(it, filter) {
 			continue
 		}
 		if prefix != "" && !strings.HasPrefix(it.RelPath, prefix) {
@@ -526,6 +611,14 @@ func (s *DashboardServer) handleTree(w http.ResponseWriter, r *http.Request) {
 			tf.NewerLocal++
 		case diff.StatusNewerPeer:
 			tf.NewerPeer++
+		case diff.StatusDeletedLocal:
+			tf.DeletedLocal++
+		case diff.StatusDeletedPeer:
+			tf.DeletedPeer++
+		case diff.StatusMoveLocal, diff.StatusMovePeer:
+			tf.MoveCount++
+		case diff.StatusConflictDeleteLocal, diff.StatusConflictDeletePeer, diff.StatusSizeDiff, diff.StatusHashDiff:
+			tf.Conflict++
 		}
 	}
 
@@ -536,17 +629,37 @@ func (s *DashboardServer) handleTree(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func matchesFilter(it diff.Item, filter string) bool {
+	switch filter {
+	case "", "DIFF":
+		return it.Status != diff.StatusIdentical
+	case "ALL":
+		return true
+	case "MOVE":
+		return it.Status == diff.StatusMoveLocal || it.Status == diff.StatusMovePeer
+	case "CONFLICT":
+		return it.Status == diff.StatusConflictDeleteLocal ||
+			it.Status == diff.StatusConflictDeletePeer ||
+			it.Status == diff.StatusSizeDiff ||
+			it.Status == diff.StatusHashDiff
+	default:
+		return string(it.Status) == filter
+	}
+}
+
 func filterItems(items []diff.Item, filter, q string, limit int) []diff.Item {
 	q = strings.ToLower(strings.TrimSpace(q))
-	out := make([]diff.Item, 0, min(len(items), limit))
+	capHint := len(items)
+	if limit > 0 && limit < capHint {
+		capHint = limit
+	}
+	out := make([]diff.Item, 0, capHint)
 	for _, it := range items {
-		if filter == "DIFF" && it.Status == diff.StatusIdentical {
+		if !matchesFilter(it, filter) {
 			continue
 		}
-		if filter != "DIFF" && filter != "ALL" && string(it.Status) != filter {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(it.RelPath), q) {
+		if q != "" && !strings.Contains(strings.ToLower(it.RelPath), q) &&
+			!strings.Contains(strings.ToLower(it.OldRelPath), q) {
 			continue
 		}
 		out = append(out, it)
@@ -672,24 +785,108 @@ func (s *DashboardServer) handleVerifyHash(w http.ResponseWriter, r *http.Reques
 			s.lastPeer[k] = m
 		}
 	}
-	items, summary := diff.Compare(s.lastLocal, s.lastPeer)
+	items, summary := diff.CompareWithBaseline(s.lastLocal, s.lastPeer, toBaselineMeta(s.lastBaseline))
 	s.lastItems = items
 	s.lastSum = summary
 	if req.Mode == "text_candidates" {
 		s.textVerifyPaths = nil
 	}
+	baseCount := 0
+	var baseToSync *state.Baseline
+	baseKey := s.lastBaselineKey
+	if s.lastBaseline != nil && !summary.EmptyLocalGuard && !summary.EmptyPeerGuard {
+		if updateBaselineFromCompare(s.lastBaseline, s.lastLocal, s.lastPeer, items) {
+			s.lastBaseline.UpdatedAt = time.Now().UnixNano()
+			_ = s.stateStore.Save(s.lastBaseline)
+			baseToSync = s.lastBaseline
+		}
+		baseCount = len(s.lastBaseline.Entries)
+	} else if s.lastBaseline != nil {
+		baseCount = len(s.lastBaseline.Entries)
+	}
 	s.mu.Unlock()
+	if baseToSync != nil && baseKey != "" {
+		_ = client.PutBaseline(ctx, baseKey, baseToSync)
+	}
+
+	diffTotal := summary.Total - summary.Identical
 	dashLog("Verify SHA-256 selesai: %d file", len(targetPaths))
 
 	writeJSON(w, map[string]any{
-		"summary": summary,
-		"items":   filterItems(items, "DIFF", "", 2000),
+		"summary":        summary,
+		"total_diff":     diffTotal,
+		"baseline_count": baseCount,
+		"items":          filterItems(items, "DIFF", "", 20000),
 	})
 }
 
 type ExecuteAction struct {
-	RelPath string `json:"rel_path"`
-	Action  string `json:"action"` // push, pull, delete_local, delete_peer
+	RelPath    string `json:"rel_path"`
+	OldRelPath string `json:"old_rel_path,omitempty"`
+	Action     string `json:"action"` // push, pull, delete_local, delete_peer, move_local, move_peer
+}
+
+func (s *DashboardServer) runOneAction(
+	ctx context.Context,
+	client *transport.PeerClient,
+	localRoot, remoteRoot string,
+	act ExecuteAction,
+	localMeta, peerMeta map[string]scanner.FileMeta,
+	permanentDelete bool,
+) (int64, error) {
+	switch act.Action {
+	case "push":
+		abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
+		if joinErr != nil {
+			return 0, joinErr
+		}
+		var mtime int64
+		if m, ok := localMeta[act.RelPath]; ok {
+			mtime = m.MTimeNS
+		}
+		return client.UploadFile(ctx, remoteRoot, act.RelPath, abs, mtime)
+	case "pull":
+		abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
+		if joinErr != nil {
+			return 0, joinErr
+		}
+		var mtime int64
+		if m, ok := peerMeta[act.RelPath]; ok {
+			mtime = m.MTimeNS
+		}
+		return client.DownloadFile(ctx, remoteRoot, act.RelPath, abs, mtime)
+	case "delete_local":
+		abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
+		if joinErr != nil {
+			return 0, joinErr
+		}
+		return 0, fsops.DeleteFile(abs, permanentDelete)
+	case "delete_peer":
+		return 0, client.DeleteRemote(ctx, remoteRoot, act.RelPath, permanentDelete)
+	case "move_local":
+		oldAbs, joinErr := transport.SafeJoin(localRoot, act.OldRelPath)
+		if joinErr != nil {
+			return 0, joinErr
+		}
+		newAbs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
+		if joinErr != nil {
+			return 0, joinErr
+		}
+		if !strings.EqualFold(oldAbs, newAbs) {
+			if err := fsops.EnsureParentDir(newAbs); err != nil {
+				return 0, err
+			}
+			if err := os.Rename(oldAbs, newAbs); err != nil {
+				return 0, err
+			}
+			fsops.CleanEmptyParents(filepath.Dir(oldAbs), localRoot)
+		}
+		return 0, nil
+	case "move_peer":
+		return 0, client.MoveRemote(ctx, remoteRoot, act.OldRelPath, act.RelPath)
+	default:
+		return 0, nil
+	}
 }
 
 func (s *DashboardServer) handleExecute(w http.ResponseWriter, r *http.Request) {
@@ -730,31 +927,86 @@ func (s *DashboardServer) handleExecute(w http.ResponseWriter, r *http.Request) 
 	localRoot := config.ExpandPath(pair.LocalPath)
 	total := len(req.Actions)
 	var totalBytes int64
+	var moves []ExecuteAction
+	var rest []ExecuteAction
 	for _, a := range req.Actions {
 		switch a.Action {
 		case "push":
 			if m, ok := localMeta[a.RelPath]; ok {
 				totalBytes += m.Size
 			}
+			rest = append(rest, a)
 		case "pull":
 			if m, ok := peerMeta[a.RelPath]; ok {
 				totalBytes += m.Size
 			}
+			rest = append(rest, a)
+		case "move_local", "move_peer":
+			moves = append(moves, a)
+		default:
+			rest = append(rest, a)
 		}
 	}
-	dashLog("Eksekusi dimulai: %d aksi", total)
+	dashLog("Eksekusi dimulai: %d aksi (%d move)", total, len(moves))
 	var doneCount int64
 	var bytesMoved int64
 	var errList []string
 	var errMu sync.Mutex
+	var okMu sync.Mutex
+	var succeeded []ExecuteAction
 
-	jobCh := make(chan ExecuteAction, total)
-	for _, a := range req.Actions {
+	start := time.Now()
+	reportProgress := func(act ExecuteAction, moved int64, err error) {
+		if err != nil {
+			errMu.Lock()
+			errList = append(errList, fmt.Sprintf("%s (%s): %v", act.RelPath, act.Action, err))
+			errMu.Unlock()
+		} else {
+			okMu.Lock()
+			succeeded = append(succeeded, act)
+			okMu.Unlock()
+		}
+
+		dc := atomic.AddInt64(&doneCount, 1)
+		bm := atomic.AddInt64(&bytesMoved, moved)
+		elapsed := time.Since(start).Seconds()
+		mbps := 0.0
+		if elapsed > 0 {
+			mbps = (float64(bm) / (1024 * 1024)) / elapsed
+		}
+		etaSec := int64(-1)
+		if totalBytes > 0 && bm > 0 {
+			etaSec = estimateETA(start, bm, totalBytes)
+		} else if totalBytes == 0 {
+			etaSec = estimateETA(start, dc, int64(total))
+		}
+		s.broadcastSSE(map[string]any{
+			"done":        dc,
+			"total":       total,
+			"bytes_moved": bm,
+			"bytes_total": totalBytes,
+			"mbps":        mbps,
+			"eta_sec":     etaSec,
+			"current":     act.RelPath,
+		})
+	}
+
+	// Phase 1: run move_local / move_peer sequentially before parallel copy/delete workers.
+	for _, act := range moves {
+		if ctx.Err() != nil {
+			break
+		}
+		moved, err := s.runOneAction(ctx, client, localRoot, pair.RemotePath, act, localMeta, peerMeta, req.PermanentDelete)
+		reportProgress(act, moved, err)
+	}
+
+	// Phase 2: run push / pull / delete actions concurrently.
+	jobCh := make(chan ExecuteAction, len(rest))
+	for _, a := range rest {
 		jobCh <- a
 	}
 	close(jobCh)
 
-	start := time.Now()
 	workers := 4
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -765,75 +1017,29 @@ func (s *DashboardServer) handleExecute(w http.ResponseWriter, r *http.Request) 
 				if ctx.Err() != nil {
 					return
 				}
-				var moved int64
-				var err error
-
-				switch act.Action {
-				case "push":
-					abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
-					if joinErr != nil {
-						err = joinErr
-					} else {
-						var mtime int64
-						if m, ok := localMeta[act.RelPath]; ok {
-							mtime = m.MTimeNS
-						}
-						moved, err = client.UploadFile(ctx, pair.RemotePath, act.RelPath, abs, mtime)
-					}
-				case "pull":
-					abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
-					if joinErr != nil {
-						err = joinErr
-					} else {
-						var mtime int64
-						if m, ok := peerMeta[act.RelPath]; ok {
-							mtime = m.MTimeNS
-						}
-						moved, err = client.DownloadFile(ctx, pair.RemotePath, act.RelPath, abs, mtime)
-					}
-				case "delete_local":
-					abs, joinErr := transport.SafeJoin(localRoot, act.RelPath)
-					if joinErr != nil {
-						err = joinErr
-					} else {
-						err = fsops.DeleteFile(abs, req.PermanentDelete)
-					}
-				case "delete_peer":
-					err = client.DeleteRemote(ctx, pair.RemotePath, act.RelPath, req.PermanentDelete)
-				}
-
-				if err != nil {
-					errMu.Lock()
-					errList = append(errList, fmt.Sprintf("%s (%s): %v", act.RelPath, act.Action, err))
-					errMu.Unlock()
-				}
-
-				dc := atomic.AddInt64(&doneCount, 1)
-				bm := atomic.AddInt64(&bytesMoved, moved)
-				elapsed := time.Since(start).Seconds()
-				mbps := 0.0
-				if elapsed > 0 {
-					mbps = (float64(bm) / (1024 * 1024)) / elapsed
-				}
-				etaSec := int64(-1)
-				if totalBytes > 0 && bm > 0 {
-					etaSec = estimateETA(start, bm, totalBytes)
-				} else if totalBytes == 0 {
-					etaSec = estimateETA(start, dc, int64(total))
-				}
-				s.broadcastSSE(map[string]any{
-					"done":        dc,
-					"total":       total,
-					"bytes_moved": bm,
-					"bytes_total": totalBytes,
-					"mbps":        mbps,
-					"eta_sec":     etaSec,
-					"current":     act.RelPath,
-				})
+				moved, err := s.runOneAction(ctx, client, localRoot, pair.RemotePath, act, localMeta, peerMeta, req.PermanentDelete)
+				reportProgress(act, moved, err)
 			}
 		}()
 	}
 	wg.Wait()
+
+	// Update and replicate baseline for succeeded actions.
+	if len(succeeded) > 0 {
+		s.mu.Lock()
+		base := s.lastBaseline
+		baseKey := s.lastBaselineKey
+		var baseToSave *state.Baseline
+		if base != nil && baseKey != "" && applySucceededActionsToBaseline(base, localMeta, peerMeta, succeeded) {
+			base.UpdatedAt = time.Now().UnixNano()
+			_ = s.stateStore.Save(base)
+			baseToSave = base
+		}
+		s.mu.Unlock()
+		if baseToSave != nil && ctx.Err() == nil {
+			_ = client.PutBaseline(ctx, baseKey, baseToSave)
+		}
+	}
 
 	dashLog("Eksekusi selesai: %d/%d aksi (%.2f MB)", doneCount, total, float64(bytesMoved)/(1024*1024))
 	writeJSON(w, map[string]any{
@@ -842,6 +1048,145 @@ func (s *DashboardServer) handleExecute(w http.ResponseWriter, r *http.Request) 
 		"duration_ms": time.Since(start).Milliseconds(),
 		"errors":      errList,
 	})
+}
+
+func (s *DashboardServer) handleResetBaseline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	client := s.peerClient
+	key := s.lastBaselineKey
+	if s.lastBaseline != nil {
+		s.lastBaseline.Entries = make(map[string]state.Entry)
+		s.lastBaseline.UpdatedAt = 0
+	}
+	s.mu.Unlock()
+
+	if key != "" && s.stateStore != nil {
+		if err := s.stateStore.Reset(key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if client != nil {
+			_ = client.DeleteBaseline(r.Context(), key)
+		}
+	}
+	dashLog("Baseline direset untuk pasangan aktif")
+	writeJSON(w, map[string]any{"reset": true})
+}
+
+func toBaselineMeta(b *state.Baseline) map[string]diff.BaselineMeta {
+	if b == nil || len(b.Entries) == 0 {
+		return nil
+	}
+	out := make(map[string]diff.BaselineMeta, len(b.Entries))
+	for k, e := range b.Entries {
+		out[k] = diff.BaselineMeta{Size: e.Size, MTimeNS: e.MTimeNS, Hash: e.Hash}
+	}
+	return out
+}
+
+func updateBaselineFromCompare(
+	b *state.Baseline,
+	localMeta, peerMeta map[string]scanner.FileMeta,
+	items []diff.Item,
+) bool {
+	if b.Entries == nil {
+		b.Entries = make(map[string]state.Entry)
+	}
+	changed := false
+	for _, it := range items {
+		if it.Status == diff.StatusIdentical {
+			cur, exists := b.Entries[it.RelPath]
+			next := state.Entry{Size: it.LocalSize, MTimeNS: it.LocalMTimeNS, Hash: it.LocalHash}
+			if next.Hash == "" {
+				next.Hash = it.PeerHash
+			}
+			if next.Hash == "" && exists {
+				next.Hash = cur.Hash
+			}
+			if !exists || cur != next {
+				b.Entries[it.RelPath] = next
+				changed = true
+			}
+		}
+	}
+	for k := range b.Entries {
+		_, hasL := localMeta[k]
+		_, hasP := peerMeta[k]
+		if !hasL && !hasP {
+			delete(b.Entries, k)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func applySucceededActionsToBaseline(
+	b *state.Baseline,
+	localMeta, peerMeta map[string]scanner.FileMeta,
+	succeeded []ExecuteAction,
+) bool {
+	if b.Entries == nil {
+		b.Entries = make(map[string]state.Entry)
+	}
+	hasL := make(map[string]bool, len(localMeta))
+	for k := range localMeta {
+		hasL[k] = true
+	}
+	hasP := make(map[string]bool, len(peerMeta))
+	for k := range peerMeta {
+		hasP[k] = true
+	}
+
+	changed := false
+	for _, act := range succeeded {
+		switch act.Action {
+		case "push":
+			if m, ok := localMeta[act.RelPath]; ok {
+				b.Entries[act.RelPath] = state.Entry{Size: m.Size, MTimeNS: m.MTimeNS, Hash: m.Hash}
+				hasP[act.RelPath] = true
+				changed = true
+			}
+		case "pull":
+			if m, ok := peerMeta[act.RelPath]; ok {
+				b.Entries[act.RelPath] = state.Entry{Size: m.Size, MTimeNS: m.MTimeNS, Hash: m.Hash}
+				hasL[act.RelPath] = true
+				changed = true
+			}
+		case "move_local":
+			delete(b.Entries, act.OldRelPath)
+			hasL[act.OldRelPath] = false
+			if m, ok := peerMeta[act.RelPath]; ok {
+				b.Entries[act.RelPath] = state.Entry{Size: m.Size, MTimeNS: m.MTimeNS, Hash: m.Hash}
+				hasL[act.RelPath] = true
+			}
+			changed = true
+		case "move_peer":
+			delete(b.Entries, act.OldRelPath)
+			hasP[act.OldRelPath] = false
+			if m, ok := localMeta[act.RelPath]; ok {
+				b.Entries[act.RelPath] = state.Entry{Size: m.Size, MTimeNS: m.MTimeNS, Hash: m.Hash}
+				hasP[act.RelPath] = true
+			}
+			changed = true
+		case "delete_local":
+			hasL[act.RelPath] = false
+			if !hasP[act.RelPath] {
+				delete(b.Entries, act.RelPath)
+				changed = true
+			}
+		case "delete_peer":
+			hasP[act.RelPath] = false
+			if !hasL[act.RelPath] {
+				delete(b.Entries, act.RelPath)
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func (s *DashboardServer) handleEvents(w http.ResponseWriter, r *http.Request) {

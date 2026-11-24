@@ -18,6 +18,7 @@ import (
 	"synclens/internal/auth"
 	"synclens/internal/fsops"
 	"synclens/internal/scanner"
+	"synclens/internal/state"
 )
 
 type PeerClient struct {
@@ -480,6 +481,97 @@ func (c *PeerClient) DeleteRemote(ctx context.Context, remoteRoot, relPath strin
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("remote delete failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *PeerClient) MoveRemote(ctx context.Context, remoteRoot, oldRelPath, newRelPath string) error {
+	data, err := json.Marshal(MoveRequest{
+		RootPath:   remoteRoot,
+		OldRelPath: oldRelPath,
+		NewRelPath: newRelPath,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "/api/v1/move", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("remote move failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *PeerClient) GetBaseline(ctx context.Context, key string) (*state.Baseline, error) {
+	q := url.Values{}
+	q.Set("key", key)
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/v1/baseline?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get baseline failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return state.DecodeGzip(resp.Body)
+}
+
+func (c *PeerClient) PutBaseline(ctx context.Context, key string, b *state.Baseline) error {
+	gz, err := state.EncodeGzip(b)
+	if err != nil {
+		return err
+	}
+	q := url.Values{}
+	q.Set("key", key)
+	req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/baseline?"+q.Encode(), bytes.NewReader(gz))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("put baseline failed (%d): %s", resp.StatusCode, string(msg))
+	}
+	return nil
+}
+
+func (c *PeerClient) DeleteBaseline(ctx context.Context, key string) error {
+	q := url.Values{}
+	q.Set("key", key)
+	req, err := c.newRequest(ctx, http.MethodDelete, "/api/v1/baseline?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete baseline failed (%d): %s", resp.StatusCode, string(msg))
 	}
 	return nil
 }

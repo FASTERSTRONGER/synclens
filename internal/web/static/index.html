@@ -3,13 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SyncLens — LAN Visual Diff & Sync</title>
+  <meta name="author" content="OK Muhammad Majid Maulana">
+  <meta name="description" content="SyncLens — LAN Visual Diff & Two-Way Sync Utility">
+  <title>SyncLens — LAN Visual Diff &amp; Sync</title>
+  <link rel="icon" type="image/svg+xml" href="logo.svg">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
+      <img src="logo.svg" alt="SyncLens Logo" class="brand-logo" width="28" height="28">
       <span class="brand-title">SyncLens</span>
+      <span id="appVersionBadge" class="version-pill">v2.0</span>
       <span class="brand-sub" id="localDeviceLabel">Local: —</span>
     </div>
     <div class="peer-status" id="peerBadge">
@@ -102,7 +107,24 @@
         <button class="stat-chip" data-filter="NEWER_PEER">Lebih Baru di Peer (<span id="countNewerPeer">0</span>)</button>
         <button class="stat-chip" data-filter="NEW_LOCAL">Hanya di Lokal (<span id="countNewLocal">0</span>)</button>
         <button class="stat-chip" data-filter="NEW_PEER">Hanya di Peer (<span id="countNewPeer">0</span>)</button>
+        <button class="stat-chip" data-filter="DELETED_LOCAL">Dihapus di Lokal (<span id="countDeletedLocal">0</span>)</button>
+        <button class="stat-chip" data-filter="DELETED_PEER">Dihapus di Peer (<span id="countDeletedPeer">0</span>)</button>
+        <button class="stat-chip" data-filter="MOVE">Pindah/Rename (<span id="countMove">0</span>)</button>
+        <button class="stat-chip" data-filter="CONFLICT">Konflik (<span id="countConflict">0</span>)</button>
         <button class="stat-chip" data-filter="IDENTICAL">Identik (<span id="countIdentical">0</span>)</button>
+      </div>
+
+      <div id="emptySideGuardBar" class="alert-danger hidden">
+        <span id="emptySideGuardText"></span>
+        <button id="overrideEmptyGuardBtn" class="btn secondary" type="button">Saya Yakin — Centang Semua Hapus</button>
+      </div>
+
+      <div id="baselineBar" class="baseline-bar hidden">
+        <span id="baselineStatusText"></span>
+        <div class="baseline-actions">
+          <button id="loadAllDiffBtn" class="btn secondary hidden" type="button">Muat &amp; Pilih Semua</button>
+          <button id="resetBaselineBtn" class="btn secondary" type="button">Reset Baseline</button>
+        </div>
       </div>
 
       <div id="verifyHintBar" class="hint-bar hidden">
@@ -191,6 +213,10 @@
       </div>
     </section>
   </main>
+
+  <footer class="app-footer">
+    <span>SyncLens <span id="footerVersion">v2.0</span> &bull; Developed by <strong id="footerDeveloper">OK Muhammad Majid Maulana</strong></span>
+  </footer>
 
   <div id="browseModal" class="modal-backdrop hidden">
     <div class="modal">

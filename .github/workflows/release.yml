@@ -23,6 +23,18 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
+      - name: Embed Windows icon and version metadata
+        run: |
+          VER_RAW="${GITHUB_REF_NAME#v}"
+          IFS='.' read -r MAJ MIN PAT BLD <<< "$VER_RAW"
+          WIN_VER="${MAJ:-0}.${MIN:-0}.${PAT:-0}.${BLD:-0}"
+          go run github.com/tc-hib/go-winres@v0.3.3 make \
+            --in winres/winres.json \
+            --out cmd/synclens/rsrc \
+            --arch amd64 \
+            --product-version="$WIN_VER" \
+            --file-version="$WIN_VER"
+
       - name: Build Windows binary
         env:
           GOOS: windows

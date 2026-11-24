@@ -18,6 +18,11 @@ const state = {
   browseCurrentPath: "",
   localSpace: null,
   peerSpace: null,
+  emptyLocalGuard: false,
+  emptyPeerGuard: false,
+  baselineCount: 0,
+  totalDiff: 0,
+  lastSpacePlan: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -57,6 +62,12 @@ function statusLabel(s) {
     NEWER_PEER: "Peer Lebih Baru",
     SIZE_DIFF: "Ukuran Beda",
     HASH_DIFF: "Isi Beda (Hash)",
+    DELETED_LOCAL: "Dihapus di Lokal",
+    DELETED_PEER: "Dihapus di Peer",
+    CONFLICT_DELETE_LOCAL: "Konflik (Hapus Lokal vs Edit Peer)",
+    CONFLICT_DELETE_PEER: "Konflik (Hapus Peer vs Edit Lokal)",
+    MOVE_LOCAL: "Pindah di Lokal",
+    MOVE_PEER: "Pindah di Peer",
     IDENTICAL: "Identik",
   };
   return map[s] || s;
@@ -98,6 +109,13 @@ async function loadPairs() {
   const res = await fetch("/api/local/pairs");
   const data = await res.json();
   el("localDeviceLabel").textContent = `Perangkat Ini: ${data.device_name}`;
+  if (data.version) {
+    el("appVersionBadge").textContent = data.version;
+    el("footerVersion").textContent = data.version;
+  }
+  if (data.developer) {
+    el("footerDeveloper").textContent = data.developer;
+  }
   state.pairs = data.pairs || [];
   renderPairSelect();
   if (data.connected && data.peer) {
@@ -282,7 +300,10 @@ function registerItems(list, autoCheck) {
     if (!(it.rel_path in state.actions)) {
       state.actions[it.rel_path] = it.default_action;
     }
-    if (autoCheck && it.default_action !== "skip") {
+    const guardBlocked =
+      (state.emptyLocalGuard && it.status === "DELETED_LOCAL") ||
+      (state.emptyPeerGuard && it.status === "DELETED_PEER");
+    if (autoCheck && !guardBlocked && it.default_action !== "skip") {
       state.checked.add(it.rel_path);
     }
   }
@@ -315,23 +336,61 @@ function applyCompareResult(data) {
   state.checkedFolders.clear();
   if (data.local_space !== undefined) state.localSpace = data.local_space;
   if (data.peer_space !== undefined) state.peerSpace = data.peer_space;
-  registerItems(state.items, true);
+
   const s = data.summary || {};
-  const diffCount = (s.new_local || 0) + (s.new_peer || 0) + (s.newer_local || 0) + (s.newer_peer || 0) + (s.size_diff || 0) + (s.hash_diff || 0);
-  el("countDiff").textContent = diffCount;
+  state.emptyLocalGuard = !!s.empty_local_guard;
+  state.emptyPeerGuard = !!s.empty_peer_guard;
+  state.baselineCount = data.baseline_count ?? state.baselineCount;
+  const conflictCount = (s.size_diff || 0) + (s.hash_diff || 0) + (s.conflict_delete_local || 0) + (s.conflict_delete_peer || 0);
+  const moveCount = (s.move_local || 0) + (s.move_peer || 0);
+  const computedDiff = (s.new_local || 0) + (s.new_peer || 0) + (s.newer_local || 0) + (s.newer_peer || 0) +
+    (s.deleted_local || 0) + (s.deleted_peer || 0) + moveCount + conflictCount;
+  state.totalDiff = data.total_diff ?? computedDiff;
+
+  registerItems(state.items, true);
+
+  el("countDiff").textContent = state.totalDiff;
   el("countNewerLocal").textContent = s.newer_local || 0;
   el("countNewerPeer").textContent = s.newer_peer || 0;
   el("countNewLocal").textContent = s.new_local || 0;
   el("countNewPeer").textContent = s.new_peer || 0;
+  el("countDeletedLocal").textContent = s.deleted_local || 0;
+  el("countDeletedPeer").textContent = s.deleted_peer || 0;
+  el("countMove").textContent = moveCount;
+  el("countConflict").textContent = conflictCount;
   el("countIdentical").textContent = s.identical || 0;
 
-  const textCount = data.text_verify_count || 0;
-  if (textCount > 0) {
-    el("verifyHintText").textContent =
-      `Hint: Ditemukan ${textCount.toLocaleString("id-ID")} file teks/kode berukuran byte sama dengan tanggal berbeda. Klik tombol di kanan jika ingin verifikasi SHA-256.`;
-    el("verifyHintBar").classList.remove("hidden");
+  if (state.emptyLocalGuard || state.emptyPeerGuard) {
+    const emptySides = [];
+    if (state.emptyLocalGuard) emptySides.push("Lokal (PC)");
+    if (state.emptyPeerGuard) emptySides.push("Peer (Laptop)");
+    el("emptySideGuardText").textContent =
+      `PENGAMAN FOLDER KOSONG AKTIF: Folder ${emptySides.join(" & ")} terbaca kosong (0 file), padahal baseline mencatat ${state.baselineCount.toLocaleString("id-ID")} file. Aksi hapus otomatis ditahan untuk mencegah kehilangan data massal.`;
+    el("emptySideGuardBar").classList.remove("hidden");
   } else {
-    el("verifyHintBar").classList.add("hidden");
+    el("emptySideGuardBar").classList.add("hidden");
+  }
+
+  el("baselineStatusText").textContent =
+    `Baseline 3-arah aktif: ${state.baselineCount.toLocaleString("id-ID")} file tercatat (replikasi PC ↔ Peer otomatis).`;
+  el("baselineBar").classList.remove("hidden");
+
+  if (state.totalDiff > state.items.length) {
+    el("loadAllDiffBtn").textContent = `Muat & Pilih Semua (${state.totalDiff.toLocaleString("id-ID")} item)`;
+    el("loadAllDiffBtn").classList.remove("hidden");
+  } else {
+    el("loadAllDiffBtn").classList.add("hidden");
+  }
+
+  if (data.text_verify_count !== undefined) {
+    const textCount = data.text_verify_count || 0;
+    if (textCount > 0) {
+      el("verifyHintText").textContent =
+        `Hint: Ditemukan ${textCount.toLocaleString("id-ID")} file teks/kode berukuran byte sama dengan tanggal berbeda. Klik tombol di kanan jika ingin verifikasi SHA-256.`;
+      el("verifyHintBar").classList.remove("hidden");
+    } else {
+      el("verifyHintBar").classList.add("hidden");
+    }
   }
   refreshView();
 }
@@ -399,6 +458,10 @@ function renderTreeTable() {
     if (f.newer_peer) summaryParts.push(`Peer Baru: ${f.newer_peer}`);
     if (f.new_local) summaryParts.push(`+Lokal: ${f.new_local}`);
     if (f.new_peer) summaryParts.push(`+Peer: ${f.new_peer}`);
+    if (f.deleted_local) summaryParts.push(`Hapus Peer: ${f.deleted_local}`);
+    if (f.deleted_peer) summaryParts.push(`Hapus Lokal: ${f.deleted_peer}`);
+    if (f.move_count) summaryParts.push(`Pindah: ${f.move_count}`);
+    if (f.conflict) summaryParts.push(`Konflik: ${f.conflict}`);
 
     const isFolderChecked = state.checkedFolders.has(f.rel_path);
     const fAct = state.folderActions[f.rel_path] || "";
@@ -447,15 +510,21 @@ function buildFileRow(it, displayName) {
   const act = state.actions[it.rel_path] || "skip";
   const isDel = act === "delete_local" || act === "delete_peer";
 
+  const moveSub = it.old_rel_path
+    ? `<span class="sub-meta move-from">Dari: ${escapeHtml(it.old_rel_path)}</span>`
+    : "";
+
   tr.innerHTML = `
     <td class="col-check"><input type="checkbox" class="row-chk" data-path="${escapeHtml(it.rel_path)}" ${state.checked.has(it.rel_path) ? "checked" : ""}></td>
-    <td class="mono">${escapeHtml(displayName)}</td>
+    <td class="mono">${escapeHtml(displayName)}${moveSub}</td>
     <td><span class="badge b-${it.status}">${statusLabel(it.status)}</span></td>
     <td class="num">${it.has_local ? formatBytes(it.local_size) : "—"}<span class="sub-meta">${it.has_local ? formatTime(it.local_mtime_ns) : ""}</span></td>
     <td class="num">${it.has_peer ? formatBytes(it.peer_size) : "—"}<span class="sub-meta">${it.has_peer ? formatTime(it.peer_mtime_ns) : ""}</span></td>
     <td>
       <select class="action-select ${isDel ? "is-delete" : ""}" data-path="${escapeHtml(it.rel_path)}">
         <option value="skip" ${act === "skip" ? "selected" : ""}>Lewati (Skip)</option>
+        ${it.status === "MOVE_PEER" && it.old_rel_path ? `<option value="move_peer" ${act === "move_peer" ? "selected" : ""}>Pindah di Peer (os.Rename)</option>` : ""}
+        ${it.status === "MOVE_LOCAL" && it.old_rel_path ? `<option value="move_local" ${act === "move_local" ? "selected" : ""}>Pindah di Lokal (os.Rename)</option>` : ""}
         ${it.has_local ? `<option value="push" ${act === "push" ? "selected" : ""}>Copy Lokal → Peer</option>` : ""}
         ${it.has_peer ? `<option value="pull" ${act === "pull" ? "selected" : ""}>Copy Peer → Lokal</option>` : ""}
         ${it.has_local ? `<option value="delete_local" ${act === "delete_local" ? "selected" : ""}>Hapus Lokal</option>` : ""}
@@ -660,16 +729,77 @@ function getSelectedActions() {
   for (const rel of state.checked) {
     const act = state.actions[rel];
     if (act && act !== "skip") {
-      list.push({ rel_path: rel, action: act });
+      const item = { rel_path: rel, action: act };
+      if ((act === "move_local" || act === "move_peer") && state.itemMap[rel]?.old_rel_path) {
+        item.old_rel_path = state.itemMap[rel].old_rel_path;
+      }
+      list.push(item);
     }
   }
   return list;
 }
 
+el("loadAllDiffBtn").addEventListener("click", async () => {
+  const btn = el("loadAllDiffBtn");
+  btn.disabled = true;
+  btn.textContent = "Memuat seluruh item...";
+  try {
+    const res = await fetch("/api/local/items?filter=DIFF&all=1");
+    const data = await parseResponseJSON(res);
+    const allItems = data.items || [];
+    state.items = allItems;
+    registerItems(allItems, true);
+    btn.classList.add("hidden");
+    refreshView();
+  } catch (err) {
+    alert("Gagal memuat semua item: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("overrideEmptyGuardBtn").addEventListener("click", async () => {
+  if (!confirm("Yakin folder kosong tersebut bukan karena drive bermasalah dan ingin mencentang semua aksi hapus?")) {
+    return;
+  }
+  try {
+    const filters = [];
+    if (state.emptyLocalGuard) filters.push("DELETED_LOCAL");
+    if (state.emptyPeerGuard) filters.push("DELETED_PEER");
+    state.emptyLocalGuard = false;
+    state.emptyPeerGuard = false;
+    for (const f of filters) {
+      const res = await fetch(`/api/local/items?filter=${f}&all=1`);
+      const data = await parseResponseJSON(res);
+      registerItems(data.items || [], true);
+    }
+    el("emptySideGuardBar").classList.add("hidden");
+    refreshView();
+  } catch (err) {
+    alert("Gagal memuat daftar hapus: " + err.message);
+  }
+});
+
+el("resetBaselineBtn").addEventListener("click", async () => {
+  if (!confirm("Reset baseline 3-arah untuk pasangan folder ini? Setelah reset, file yang terhapus sebelumnya tidak lagi dikenali sebagai penghapusan sampai sinkronisasi berikutnya.")) {
+    return;
+  }
+  try {
+    const res = await fetch("/api/local/reset-baseline", { method: "POST" });
+    await parseResponseJSON(res);
+    state.baselineCount = 0;
+    el("baselineStatusText").textContent = "Baseline direset (0 file tercatat). Jalankan Scan & Bandingkan ulang untuk memperbarui.";
+  } catch (err) {
+    alert("Gagal mereset baseline: " + err.message);
+  }
+});
+
 function computeSpacePlan(list) {
   const perm = el("permanentDeleteChk").checked;
   let localWrite = 0, localNet = 0;
   let peerWrite = 0, peerNet = 0;
+  let localDeleteBytes = 0, peerDeleteBytes = 0;
+  let deleteCount = 0;
 
   for (const a of list) {
     const it = state.itemMap[a.rel_path];
@@ -684,13 +814,17 @@ function computeSpacePlan(list) {
       const pSz = it.has_peer ? (it.peer_size || 0) : 0;
       peerWrite += lSz;
       peerNet += (lSz - pSz);
-    } else if (a.action === "delete_local" && perm) {
-      localNet -= (it.local_size || 0);
-    } else if (a.action === "delete_peer" && perm) {
-      peerNet -= (it.peer_size || 0);
+    } else if (a.action === "delete_local") {
+      deleteCount++;
+      localDeleteBytes += (it.local_size || 0);
+      if (perm) localNet -= (it.local_size || 0);
+    } else if (a.action === "delete_peer") {
+      deleteCount++;
+      peerDeleteBytes += (it.peer_size || 0);
+      if (perm) peerNet -= (it.peer_size || 0);
     }
   }
-  return { localWrite, localNet, peerWrite, peerNet };
+  return { localWrite, localNet, peerWrite, peerNet, localDeleteBytes, peerDeleteBytes, deleteCount };
 }
 
 function renderSideSpace(freeElId, needElId, spaceInfo, writeBytes, netDelta) {
@@ -728,12 +862,17 @@ function renderSideSpace(freeElId, needElId, spaceInfo, writeBytes, netDelta) {
 
 function updateExecSummary() {
   const list = getSelectedActions();
-  const counts = { push: 0, pull: 0, delete_local: 0, delete_peer: 0 };
-  for (const a of list) counts[a.action] = (counts[a.action] || 0) + 1;
+  const counts = { push: 0, pull: 0, delete_local: 0, delete_peer: 0, move: 0 };
+  for (const a of list) {
+    if (a.action === "move_local" || a.action === "move_peer") counts.move++;
+    else counts[a.action] = (counts[a.action] || 0) + 1;
+  }
+  const movePart = counts.move > 0 ? `, Pindah: ${counts.move}` : "";
   el("execSummaryText").textContent =
-    `${list.length} aksi (Copy→Peer: ${counts.push}, Copy→Lokal: ${counts.pull}, Hapus Lokal: ${counts.delete_local}, Hapus Peer: ${counts.delete_peer})`;
+    `${list.length} aksi (Copy→Peer: ${counts.push}, Copy→Lokal: ${counts.pull}, Hapus Lokal: ${counts.delete_local}, Hapus Peer: ${counts.delete_peer}${movePart})`;
 
   const plan = computeSpacePlan(list);
+  state.lastSpacePlan = plan;
   const hasAnySpace = (state.localSpace?.total_bytes > 0) || (state.peerSpace?.total_bytes > 0);
   if (hasAnySpace || list.length > 0) {
     el("spacePanel").classList.remove("hidden");
@@ -755,7 +894,8 @@ el("executeBtn").addEventListener("click", async () => {
     return;
   }
   const perm = el("permanentDeleteChk").checked;
-  const hasDel = actions.some((a) => a.action.startsWith("delete_"));
+  const plan = state.lastSpacePlan || computeSpacePlan(actions);
+  const hasDel = plan.deleteCount > 0;
   let spaceWarn = "";
   if (state.localInsufficient || state.peerInsufficient) {
     const sides = [];
@@ -763,9 +903,24 @@ el("executeBtn").addEventListener("click", async () => {
     if (state.peerInsufficient) sides.push("Peer (Laptop)");
     spaceWarn = `\n\nPERINGATAN KERAS: Ruang disk di ${sides.join(" & ")} TIDAK MENCUKUPI! Proses berisiko gagal di tengah jalan.`;
   }
-  const msg = `Jalankan ${actions.length} aksi terpilih?` +
-    (hasDel ? (perm ? "\nPERINGATAN: Mode Hapus Permanen aktif!" : "\nFile yang dihapus akan dipindahkan ke Recycle Bin.") : "") +
-    spaceWarn;
+
+  let deleteWarn = "";
+  if (hasDel) {
+    deleteWarn += perm
+      ? "\nPERINGATAN: Mode Hapus Permanen aktif!"
+      : "\nFile yang dihapus akan dipindahkan ke Windows Recycle Bin.";
+
+    const twoGB = 2 * 1024 * 1024 * 1024;
+    if (!perm && (plan.localDeleteBytes >= twoGB || plan.peerDeleteBytes >= twoGB)) {
+      const delTotal = Math.max(plan.localDeleteBytes, plan.peerDeleteBytes);
+      deleteWarn += `\nPERINGATAN KUOTA RECYCLE BIN: Total ukuran file hapus besar (${formatBytes(delTotal)}). Jika melebihi batas kuota Recycle Bin Windows pada drive tersebut, Windows dapat menghapusnya secara permanen.`;
+    }
+    if (plan.deleteCount >= 100 || (state.baselineCount > 0 && (plan.deleteCount / state.baselineCount) >= 0.2)) {
+      deleteWarn += `\nPERINGATAN HAPUS MASSAL: Sebanyak ${plan.deleteCount.toLocaleString("id-ID")} file akan dihapus.`;
+    }
+  }
+
+  const msg = `Jalankan ${actions.length} aksi terpilih?` + deleteWarn + spaceWarn;
   if (!confirm(msg)) return;
 
   el("executeBtn").disabled = true;

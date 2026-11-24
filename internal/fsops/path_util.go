@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -52,4 +53,33 @@ func EnsureParentDir(targetPath string) error {
 		cur = next
 	}
 	return err
+}
+
+// CleanEmptyParents removes empty directories upward starting from dir,
+// stopping cleanly before removing stopRoot itself.
+func CleanEmptyParents(dir, stopRoot string) {
+	cleanDir := filepath.Clean(dir)
+	cleanRoot := filepath.Clean(stopRoot)
+	rootLower := strings.ToLower(cleanRoot)
+	rootPrefix := cleanRoot
+	if !strings.HasSuffix(rootPrefix, string(filepath.Separator)) {
+		rootPrefix += string(filepath.Separator)
+	}
+	rootPrefixLower := strings.ToLower(rootPrefix)
+
+	cur := cleanDir
+	for {
+		curLower := strings.ToLower(cur)
+		if curLower == rootLower || !strings.HasPrefix(curLower, rootPrefixLower) {
+			break
+		}
+		if err := os.Remove(cur); err != nil {
+			break
+		}
+		next := filepath.Dir(cur)
+		if next == cur {
+			break
+		}
+		cur = next
+	}
 }
